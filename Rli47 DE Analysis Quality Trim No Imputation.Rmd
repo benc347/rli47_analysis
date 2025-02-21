@@ -1,0 +1,559 @@
+---
+title: "Final Rli47 DE Analysis"
+author: "Ben Tibbs-Cortes"
+date: "4/11/24"
+output: html_document
+---
+
+Updated RMD for DESeq2. Uses RSEM output from server pipeline
+See http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#input-data
+https://bioconductor.org/packages/release/bioc/vignettes/tximport/inst/doc/tximport.html#DESeq2
+
+Load appropriate packages
+
+```{r}
+
+if (!require("tidyverse")) {install.packages("tidyverse")}
+if (!require("DESeq2")) {install.packages("DESeq2")}
+if (!require("RColorBrewer")) {install.packages("RColorBrewer")}
+if (!require("pheatmap")) {install.packages("pheatmap")}
+if (!require("ggplot2")) {install.packages("ggplot2")}
+if (!require("gridExtra")) {install.packages("gridExtra")}
+if (!require("cowplot")) {install.packages("cowplot")}
+if (!require("magrittr")) {install.packages("magrittr")}
+if (!require("xlsx")) {install.packages("xlsx")}
+if (!require("SummarizedExperiment")) {install.packages("SummarizedExperiment")}
+
+if (!require("BiocManager")) {install.packages("BiocManager")}
+BiocManager::install("DESeq2")
+BiocManager::install("tximport", force=TRUE)
+BiocManager::install("impute")
+
+```
+
+```{r}
+
+library(tidyverse)
+library(DESeq2)
+library(RColorBrewer)
+library(pheatmap)
+library(ggplot2)
+library(gridExtra)
+library(cowplot)
+library(magrittr)
+library(xlsx)
+library(tximport)
+library(SummarizedExperiment)
+library(dplyr)
+library(impute)
+
+```
+
+
+```{r}
+# set RSEM output as the directory of interest
+# directory is structured so that gene and isoform files for each sample are in an individual folder
+
+dir <- "6179_RSEM/genes"
+
+# import sample information table (prefix of sample [the * in *.genes.results] and the desired name [W37_1 for 1A-W37_S1])
+# also has metadata
+
+sample_info <- as_tibble(read.xlsx("sample_info.xlsx", "all"))
+
+# create a path/reference/link (not sure about the term) to the gene results files
+# check that the files exist - output should be TRUE
+# give shorter name to each file
+
+gene_results <- file.path(dir, paste0(sample_info$sample, ".genes.results"))
+all(file.exists(gene_results))
+names(gene_results) <- paste0(sample_info$name)
+
+
+#make directories
+dir.create("0_length_genes")
+dir.create("RSEM_combined")
+dir.create("DESeq_results")
+
+```
+
+
+```{r}
+# function to create DESeq datasets for any contrast, taking user input for comparisons
+# user input is the prefix (* in *_1) in sample_info for two conditions to be compared
+# first sample/prefix should be the control
+
+txi_by_comparison <- function(prefix1, prefix2, deseq_formula){
+
+  # import RSEM gene results files for the two conditions into single txi file
+  
+  gene_results_comparison <- gene_results[c(paste0(prefix1, "_1"), paste0(prefix1, "_2"), paste0(prefix1, "_3"),
+                                            paste0(prefix2, "_1"), paste0(prefix2, "_2"), paste0(prefix2, "_3"))] 
+  
+  txi_gene_comparison <- tximport(gene_results_comparison, type = "rsem", txIn = FALSE, txOut = FALSE)
+  
+  # RSEM may output effective length of a gene as 0 (if not expressed in any sample)
+  # report the features where this occurs
+
+  lengths <- as.data.frame(txi_gene_comparison$length)
+  features_0 <- lengths %>% filter_all(any_vars(. %in% c(0)))
+  write.xlsx(features_0, paste0("0_length_genes/", prefix1, "vs", prefix2, "features_estlength_0.xlsx"))
+
+  # replace any 0 with 1, as per Mike Love's other suggestion: https://support.bioconductor.org/p/92763/
+  
+  txi_gene_comparison$length[txi_gene_comparison$length == 0] <- 1
+  
+ 
+  # export combined RSEM results for later analysis
+  
+  write.xlsx(txi_gene_comparison, paste0("RSEM_combined/", prefix1, "vs", prefix2, "combined.xlsx"))
+
+  # create a DESeq2 metadata table from the relevant columns of sample_info
+  
+  DESeq2_table <- as.data.frame(sample_info)
+  DESeq2_table <- subset(DESeq2_table, select = -c(sample, folder, name))
+  rownames(DESeq2_table) <- sample_info$name
+  
+  # subset this table so that it only contains information for the two conditions in question
+  
+  comparison_table <- DESeq2_table %>% filter(condition %in% c(paste0(prefix1), paste0(prefix2)))
+  
+  # arranging it is necessary to prevent DESeqDataSetFromTximport from freaking out because row names don't match
+  # arrange to match the input order of files (gene_results_comparison)
+  # needs to have a vector
+  
+  ordervector <- c(paste0(prefix1, "_1"), paste0(prefix1, "_2"), paste0(prefix1, "_3"),
+                   paste0(prefix2, "_1"), paste0(prefix2, "_2"), paste0(prefix2, "_3"))
+  comparison_table <- comparison_table[order(match(rownames(comparison_table), ordervector)), , drop = F]
+
+  # create DESeq2 object for the comparison
+  
+  dds <- DESeqDataSetFromTximport(txi_gene_comparison, comparison_table, ~condition)
+
+  # run DESeq2 on newly created dataset
+  # first line tells DESeq2 to account for the batch effects of different replicates but to compare based on condition
+  
+  design(dds) <- formula(deseq_formula)
+  dds_analyzed <- DESeq(dds)
+  
+  # get results from dataset (after running DESeq2) and order them by ascending Q value
+  
+  res <- results(dds_analyzed, contrast = c("condition", prefix2, prefix1))
+  res <- res[order(res$pvalue),]
+  write.xlsx(res, paste0("DESeq_results/", prefix1, "_vs_", prefix2, "_DESeq2_res.xlsx"))
+  
+  # get normalized counts
+  
+  normcounts <- counts(dds_analyzed, normalized = T)
+  write.xlsx(normcounts, paste0("DESeq_results/",prefix1, "_vs_", prefix2, "_normcounts.xlsx"))
+  
+  # transform data 
+  # blind set to false because we expect experimental design to cause major differences in gene expression
+  # set transformed data to global variable for downstream PCA analysis
+  
+  dds_analyzed_vst <- vst(dds_analyzed, blind = T)
+  assign(paste0(prefix1, "vs", prefix2, "_vst"), dds_analyzed_vst, env=.GlobalEnv) 
+  
+}
+
+#2022 stationary
+txi_by_comparison("WC", "DC", ~ biorep + extraction + condition)
+txi_by_comparison("WH", "DH", ~ biorep + extraction + condition)
+txi_by_comparison("WLA", "DLA", ~ biorep + extraction + condition)
+
+txi_by_comparison("DC", "DLA", ~ biorep + condition)
+txi_by_comparison("WC", "WLA", ~ biorep + condition)
+
+txi_by_comparison("DC", "DH", ~ biorep + condition)
+txi_by_comparison("WC", "WH", ~ biorep + condition)
+
+#2022 log
+txi_by_comparison("log_WLA", "log_DLA", ~ biorep + condition)
+txi_by_comparison("log_WHP", "log_DHP", ~ biorep + condition)
+txi_by_comparison("log_W37", "log_D37", ~ biorep + condition)
+txi_by_comparison("log_W20", "log_D20", ~ biorep + condition)
+
+txi_by_comparison("log_D20", "log_DLA", ~ biorep + condition)
+txi_by_comparison("log_W20", "log_WLA", ~ biorep + condition)
+
+
+#2018 stationary
+txi_by_comparison("2018_C", "2018_LA", ~ biorep + condition)
+
+```
+
+
+Plot PCAs for contrasts of interest
+
+```{r}
+
+#PCAs
+
+plotPCA(WCvsDC_vst, intgroup=c("condition"))
+plotPCA(WHvsDH_vst, intgroup=c("condition"))
+plotPCA(WLAvsDLA_vst, intgroup=c("condition"))
+
+plotPCA(log_W37vslog_D37_vst, intgroup=c("condition"))
+plotPCA(log_W20vslog_D20_vst, intgroup=c("condition"))
+plotPCA(log_WLAvslog_DLA_vst, intgroup=c("condition"))
+plotPCA(log_WHPvslog_DHP_vst, intgroup=c("condition"))
+
+plotPCA(TEMP2018_Cvs2018_LA_vst, intgroup=c("condition"))
+
+```
+
+Compare DE genes between two contrasts
+
+```{r}
+
+#import data, rename columns, and subset
+
+olddata <- read.xlsx("DESeq_results/6C_vs_6LA_DESeq2_res.xlsx", "Sheet1")
+newdata <- read.xlsx("DESeq_results/WC_vs_WLA_DESeq2_res.xlsx", "Sheet1")
+
+colnames(olddata)[1] <- "feature"
+colnames(newdata)[1] <- "feature"
+
+old <- olddata[, c(1,3,7)]
+new <- newdata[, c(1,3,7)]
+
+#sort data
+
+old_sort <- old[order(old$feature),]
+new_sort <- new[order(new$feature),]
+
+#merge datatables and rename
+
+combined <- merge(old_sort, new_sort, by = "feature")
+colnames(combined) <- c("feature", "Log2Fold_2018", "padj_2018", "Log2Fold_2022", "padj_2022")
+
+#subsetting data so only looking at significantly expressed genes
+
+signif_only <- filter(combined, padj_2018 < 0.05 | padj_2022 < 0.05)
+
+#create new column based on whether a given gene was DE in one or both studies
+
+signif_only <- mutate(signif_only, significance = case_when(padj_2018 < 0.05 & padj_2022 < 0.05 ~ "both",
+                                                            padj_2018 >= 0.05 & padj_2022 >= 0.05 ~ "neither",
+                                                            padj_2018 >= 0.05 & padj_2022 < 0.05 ~ "2022",
+                                                            padj_2018 < 0.05 & padj_2022 >= 0.05 ~ "2018",
+                                                            TRUE ~ "NA"))
+
+#create new column describing direction of L2FC in cases where both are significant
+
+signif_F <- mutate(signif_only, direction = case_when(significance == "both" & 
+                                                           Log2Fold_2018 <= 0 & Log2Fold_2022 <= 0 ~ "same",
+                                                         significance == "both" &
+                                                           Log2Fold_2018 > 0 & Log2Fold_2022 > 0 ~ "same",
+                                                         significance == "both" ~ "diff",
+                                                         TRUE ~ "NA"))
+
+
+write.xlsx(signif_F, "DESeq_results/2018vs2022.xlsx", row.names = F)
+
+```
+
+```{r}
+
+#import data, rename columns, and subset
+
+old2018 <- read.xlsx("DESeq_results/2018deseq.xlsx", "Sheet1")
+new2018 <- read.xlsx("DESeq_results/6C_vs_6LA_DESeq2_res.xlsx", "Sheet1")
+
+colnames(old2018)[1] <- "feature"
+colnames(new2018)[1] <- "feature"
+
+old2018 <- old2018[, c(1,3,7)]
+new2018 <- new2018[, c(1,3,7)]
+
+#sort data
+
+old2018_sort <- old2018[order(old2018$feature),]
+new2018_sort <- new2018[order(new2018$feature),]
+
+#merge datatables and rename
+
+comb2018 <- merge(old2018_sort, new2018_sort, by = "feature")
+colnames(comb2018) <- c("feature", "old_l2fc", "old_padj", "new_l2fc", "new_padj")
+
+#subsetting data so only looking at significantly expressed genes
+
+signif_only2018 <- filter(comb2018, old_padj < 0.05 | new_padj < 0.05)
+
+#create new column based on whether a given gene was DE in one or both studies
+
+signif_only2018 <- mutate(signif_only2018, significance = case_when(old_padj < 0.05 & new_padj < 0.05 ~ "both",
+                                                            old_padj >= 0.05 & new_padj >= 0.05 ~ "neither",
+                                                            old_padj >= 0.05 & new_padj < 0.05 ~ "new",
+                                                            old_padj < 0.05 & new_padj >= 0.05 ~ "old",
+                                                            TRUE ~ "NA"))
+
+#create new column describing direction of L2FC in cases where both are significant
+
+signif_F2018 <- mutate(signif_only2018, direction = case_when(significance == "both" & 
+                                                           old_l2fc <= 0 & new_l2fc <= 0 ~ "same",
+                                                         significance == "both" &
+                                                           old_l2fc > 0 & new_l2fc > 0 ~ "same",
+                                                         significance == "both" ~ "diff",
+                                                         TRUE ~ "NA"))
+
+
+write.xlsx(signif_F2018, "DESeq_results/2018oldvsnew.xlsx", row.names = F)
+
+
+```
+
+
+OLD METHOD FOR IDENTIFYING SIMILARITY IN SIGNIFICANCE AND L2FC
+```{r}
+#new column checking if padj in both is <0.05
+
+combined_1 <- mutate(combined, signif_both = case_when(padj_2018 < 0.05 & padj_2022 < 0.05 ~ 1, 
+                                                  TRUE ~ 0))
+
+#check if signif in one only
+
+combined_1 <- mutate(combined, signif_both = case_when(padj_2018 < 0.05 & padj_2022 < 0.05 ~ 1, 
+                                                  TRUE ~ 0))
+
+#new column checking if log2fold change is same directionality
+
+combined_2 <- mutate(combined_1, direction = case_when(Log2Fold_2018 <= 0 & Log2Fold_2022 <= 0 ~ 1, 
+                                                     Log2Fold_2018 > 0 & Log2Fold_2022 > 0 ~ 1, 
+                                                     TRUE ~ 0))
+
+combined_f <- mutate(combined_2, similar = case_when(signif == 1 & direction == 1 ~ 1,
+                                                     TRUE ~ 0))
+
+```
+
+OLD CODE USED TO DESIGN THE ABOVE FUNCTION
+
+```{r}
+
+
+txi_by_comparison_test <- function(prefix1, prefix2){
+
+  # import RSEM gene results files for the two conditions into single txi file
+  
+  gene_results_comparison <- gene_results[c(paste0(prefix1, "_1"), paste0(prefix1, "_2"), paste0(prefix1, "_3"),
+                                            paste0(prefix2, "_1"), paste0(prefix2, "_2"), paste0(prefix2, "_3"))] 
+  
+  txi_gene_comparison <- tximport(gene_results_comparison, type = "rsem", txIn = FALSE, txOut = FALSE)
+  
+  #assign("txitest", txi_gene_comparison, env = .GlobalEnv)
+  
+  write.xlsx(txi_gene_comparison, "testtxi.xlsx")
+  
+    # export combined RSEM results for later analysis
+  
+  # write.xlsx(gene_results_comparison, paste0("RSEM_combined/", prefix1, "vs", prefix2, "combined.xlsx"))
+  
+  # RSEM may output effective length of a gene as 0 (if not expressed in any sample)
+  # report the features where this occurs
+
+  lengths <- as.data.frame(txi_gene_comparison$length)
+  features_0 <- lengths %>% filter_all(any_vars(. %in% c(0)))
+  write.xlsx(features_0, paste0("0_length_genes/", prefix1, "vs", prefix2, "features_estlength_0.xlsx"))
+
+  # replace any 0 with 1, as per Mike Love's suggestion: https://support.bioconductor.org/p/92763/
+
+  txi_gene_comparison$length[txi_gene_comparison$length == 0] <- NA
+  
+  write.xlsx(txi_gene_comparison, "testtxiNA.xlsx")
+  
+  length_imp <- impute.knn(txi_gene_comparison$length)
+txi_gene_comparison$length <- length_imp$data
+  
+write.xlsx(txi_gene_comparison, "testtxiimputed.xlsx")
+  
+}
+
+txi_by_comparison_test("C", "W20")
+  
+  # create a DESeq2 metadata table from the relevant columns of sample_info
+
+
+
+# run DESeq2 accounting for batch effects
+
+# function to create DESeq datasets for any contrast, taking user input for comparisons
+# user input is the prefix (* in *_1) in sample_info for two conditions to be compared
+# first sample/prefix should be the control
+
+txi_by_comparison2 <- function(prefix1, prefix2){
+
+  # import RSEM gene results files for the two conditions into single txi file
+  
+  gene_results_comparison <- gene_results[c(paste0(prefix1, "_1"), paste0(prefix1, "_2"), paste0(prefix1, "_3"),
+                                            paste0(prefix2, "_1"), paste0(prefix2, "_2"), paste0(prefix2, "_3"))] 
+  
+  txi_gene_comparison <- tximport(gene_results_comparison, type = "rsem", txIn = FALSE, txOut = FALSE)
+  
+  # RSEM may output effective length of a gene as 0 (if not expressed in any sample)
+  # report the features where this occurs
+
+  lengths <- as.data.frame(txi_gene_comparison$length)
+  features_0 <- lengths %>% filter_all(any_vars(. %in% c(0)))
+  write.xlsx(features_0, paste0("0_length_genes/", prefix1, "vs", prefix2, "features_estlength_0.xlsx"))
+
+  # replace any 0 with 1, as per Mike Love's suggestion: https://support.bioconductor.org/p/92763/
+  
+  txi_gene_comparison$length[txi_gene_comparison$length == 0] <- 1
+  
+  # create a DESeq2 metadata table from the relevant columns of sample_info
+  
+  DESeq2_table <- as.data.frame(sample_info)
+  DESeq2_table <- subset(DESeq2_table, select = -c(sample, folder, name))
+  rownames(DESeq2_table) <- sample_info$name
+  
+  # subset this table so that it only contains information for the two conditions in question
+  # arranging it is necessary to prevent DESeqDataSetFromTximport from freaking out because row names don't match
+
+  comparison_table <- DESeq2_table %>% filter(condition %in% c(paste0(prefix1), paste0(prefix2)))
+  comparison_table <- arrange(comparison_table, condition)
+
+  # create DESeq2 object for the comparison
+  
+  dds <- DESeqDataSetFromTximport(txi_gene_comparison, comparison_table, ~condition)
+
+  # run DESeq2 on newly created dataset
+  # first line tells DESeq2 to account for the batch effects of different replicates but to compare based on condition
+  
+  
+  dds_analyzed <- DESeq(dds)
+  
+  # get results from dataset (after running DESeq2) and order them by ascending Q value
+  
+  res <- results(dds_analyzed, contrast = c("condition", prefix1, prefix2))
+  res <- res[order(res$pvalue),]
+  write.xlsx(res, paste0(prefix1, "_vs_", prefix2, "_DESeq2_res.xlsx"))
+  
+  # transform data 
+  # blind set to false because we expect experimental design to cause major differences in gene expression
+  # set transformed data to global variable for downstream PCA analysis
+  
+  dds_analyzed_vst <- vst(dds_analyzed, blind = T)
+  assign(paste0(prefix1, "vs", prefix2, "_vst"), dds_analyzed_vst, env=.GlobalEnv) 
+  
+}
+
+txi_by_comparison2("DLA", "WLA")
+
+DESeq_multifactorial <- function(dds){
+  
+  design(dds) <- formula(~ replicate + condition)
+  dds_DESeq2 <- DESeq(dds)
+  
+  assign(paste0(deparse(substitute(dds)), "_DESeq2"), dds_DESeq2, env=.GlobalEnv) 
+}
+
+write.xlsx(sample_info, "test.xlsx")
+
+design(CvsW20_dds) <- formula(~ replicate + condition)
+test <- DESeq(CvsW20_dds)
+testres <- results(test)
+head(testres)
+assign(paste0(deparse(substitute(test)), "_DESeq2"), test, env=.GlobalEnv)
+results(CvsW20_dds_DESeq2)
+
+DESeq_multifactorial(CvsW20_dds)
+
+DESeq_multifactorial(W20vsW37_dds)
+DESeq_multifactorial(W20vsWLA_dds)
+DESeq_multifactorial(W20vsWHP_dds)
+
+DESeq_multifactorial(D20vsD37_dds)
+DESeq_multifactorial(D20vsDLA_dds)
+DESeq_multifactorial(D20vsDHP_dds)
+
+DESeq_multifactorial(D20vsW20_dds)
+DESeq_multifactorial(D37vsW37_dds)
+DESeq_multifactorial(DLAvsWLA_dds)
+DESeq_multifactorial(DHPvsWHP_dds)
+
+DESeq_multifactorial(CvsW20_dds)
+
+
+# get DESeq2 results
+
+DESeq_results <- function(dds_){
+  
+  design(dds) <- formula(~ replicate + condition)
+  dds_DESeq2 <- DESeq(dds)
+  
+  assign(paste0(deparse(substitute(dds)), "_DESeq2"), dds_DESeq2, env=.GlobalEnv) 
+}
+
+test <- DESeq(CvsW20_dds)
+testres <- results(test)
+head(testres)
+
+
+dds$condition <- factor(dds$condition, levels = c("WT20","WTLA"))
+dds_analyzed <- DESeq(dds)
+res1 <- results(dds_analyzed)
+resOrdered1 <- res1[order(res1$pvalue),]
+write.csv(resOrdered1, "test3.csv")
+
+dds_analyzed <- DESeq(dds)
+res1 <- results(dds_analyzed, contrast = c("condition", "WT20", "WTLA"))
+resOrdered1 <- res1[order(res1$pvalue),]
+write.csv(resOrdered1, "test4.csv")
+
+
+#Create DESeq2 dataset
+
+T20_dds <- DESeqDataSetFromMatrix(countData = M_Combined_20,
+                              colData = Coldata_20,
+                              design = ~ condition)
+
+T37_dds <- DESeqDataSetFromMatrix(countData = M_Combined_37,
+                              colData = Coldata_37,
+                              design = ~ condition)
+
+#Relevel the dataset
+
+T20_dds$condition <- relevel(T20_dds$condition, ref = "Control")
+T37_dds$condition <- relevel(T37_dds$condition, ref = "Control")
+
+##########DESeq2 without multifactorial design
+
+# DESeq_T20 <- DESeq(T20_dds)
+# write.xlsx(as.data.frame(results(DESeq_T20)), file="Results/T20_Results2.xlsx")
+
+# DESeq_T37 <- DESeq(T37_dds)
+# write.xlsx(as.data.frame(results(DESeq_T37)), file="Results/T37_Results2.xlsx")
+
+##########Account for batch effects with multifactorial design
+
+T20_ddsMF <- T20_dds
+T37_ddsMF <- T37_dds
+
+#DNase as a single fixed effect
+
+design(T20_ddsMF) <- formula(~ Dnase + condition)
+DS_T20_ddsMF <- DESeq(T20_ddsMF)
+write.xlsx(as.data.frame(results(DS_T20_ddsMF)), file="Results/MF_T20_Results_byDnase_noout.xlsx")
+
+design(T37_ddsMF) <- formula(~ Dnase + condition)
+DS_T37_ddsMF <- DESeq(T37_ddsMF)
+write.xlsx(as.data.frame(results(DS_T37_ddsMF)), file="Results/MF_T37_Results_byDnase_noout.xlsx")
+
+
+
+
+plotPCA(W20vsWLA_vst, intgroup=c("condition", "strain"))
+plotPCA(CvsW20_vst, intgroup=c("condition", "strain"))
+plotPCA(D20vsW20_vst, intgroup=c("condition", "strain"))
+plotPCA(D37vsW37_vst, intgroup=c("condition", "strain"))
+plotPCA(W20vsW37_vst, intgroup=c("condition", "strain"))
+plotPCA(W20vsWHP_vst, intgroup=c("condition", "strain"))
+plotPCA(W20vsWLA_vst, intgroup=c("condition", "strain"))
+plotPCA(DLAvsWLA_vst, intgroup=c("condition", "strain"))
+
+vsd2 <- vst(DS_T37_ddsMF, blind=FALSE)
+plotPCA(vsd2, intgroup=c("condition", "names"))
+
+```
+

@@ -1,0 +1,102 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+
+library(ggpubr)
+library(tidyverse)
+library(svglite)
+library(ggsignif)
+library(forcats)
+library(readxl)
+
+```
+
+```{r}
+
+#import raw CFU data and split by growth phase
+#convert to percentage
+#remove the first stationary phase replicate (wrong dilution used for control)
+CFUs <- read_xlsx("final_perc_survival.xlsx", sheet = 2) %>% mutate_if(is.numeric, ~ . * 100)
+CFUs <- CFUs[-c(13,21),]
+cfulist <- split(CFUs, with(CFUs, interaction(Phase, Strain)), drop = T)
+
+#run the shapiro-wilks test on all groups to test for normality
+#also do qqplot
+sapply(names(cfulist), function(x) shapiro.test(cfulist[[x]]$Percent_Survival), USE.NAMES = T)
+sapply(names(cfulist), function(x) qqPlot(cfulist[[x]]$Percent_Survival), USE.NAMES = T)
+
+#complement at stationary isn't normal, but I don't have data for complement at log
+  #probably just won't include it for now
+
+#run bartlett's test to test for hetero/homoscedasticity
+bartlett.test(list(cfulist$log.WT$Percent_Survival, cfulist$log.Del$Percent_Survival))
+bartlett.test(list(cfulist$stationary.WT$Percent_Survival, cfulist$stationary.Del$Percent_Survival))
+
+#log phase data is heteroscedastic, stationary phase data is homoscedastic
+
+#run t tests
+t.test(Percent_Survival ~ Strain, filter(CFUs, CFUs$Phase=="log"), alternative="two.sided", var.equal=F)
+t.test(Percent_Survival ~ Strain, filter(CFUs, CFUs$Phase=="stationary" & CFUs$Strain != "Comp"),
+       alternative="two.sided", var.equal=T)
+
+#log phase results: p=0.03466
+#stationary phase results: p=0.6121
+
+```
+
+```{r}
+
+#drop comp
+CFUs1 <- filter(CFUs, !CFUs$Strain == "Comp")# %>% mutate(treatment = paste(Strain, Phase, sep = '_'))
+
+#convert to a factor
+#CFUs1$treatment <- factor(CFUs1$treatment, levels = c("WT_log", "Del_log", "WT_stationary", "Del_stationary"))
+CFUs1$Strain <- factor(CFUs1$Strain, levels = c("WT", "Del"))
+
+#make vector containing the facet levels and the actual labels we want to use
+phasenames <- c(log = "Logarithmic Phase",
+                stationary = "Stationary Phase")
+
+#plot the log phase data
+plot_both <- ggplot(CFUs1, aes(x = Strain, y = Percent_Survival)) +
+
+  #create boxplot with dots
+  geom_boxplot(width = 0.3) + geom_dotplot(binaxis = 'y', stackdir = 'center', binwidth = 1, dotsize = 1.3) +
+
+  #set y axis limits
+  scale_y_continuous(breaks = seq(0,124,25), limits = c(0, 130), expand = c(0,1)) +
+   
+  #set axis labels
+  labs(x = "Strain and Condition", y = "Percent Survival (%)") +
+  
+  #use facet to group by growth phase
+  facet_wrap(~Phase, strip.position = "bottom", scales = "free_x", labeller = as_labeller(phasenames)) +
+  theme(axis.title.y = element_text(margin = margin(t = 10, r = 12, b = 0, l = 0))) +
+  
+  #fix up the x axis labels
+  scale_x_discrete(labels = c("6179",
+                             expression(paste("6179", Delta, italic("rli47"))),
+                            "6179",
+                             expression(paste("6179", Delta, italic("rli47"))))) +
+    
+  #run stats and label
+  geom_signif(comparisons = list(c("WT", "Del")), 
+              map_signif_level=T, tip_length = 0, y_position = c(115,115)) +
+
+  #fix the theme
+  theme_classic() +
+  theme(axis.title.x = element_blank()) +
+  
+  #fix up the facet theme as this has to be done last
+  theme(panel.spacing = unit(0, "lines"),
+        strip.background = element_blank(),
+        strip.placement = "outside")
+
+plot_both
+ggsave(file = "survival.svg", plot = plot_both, width = 7, height = 7, dpi = 600)
+ggsave(file = "survival.png", plot = plot_both, width = 7, height = 7, dpi = 600)
+
+```

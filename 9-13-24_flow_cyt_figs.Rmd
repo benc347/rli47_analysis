@@ -1,0 +1,218 @@
+---
+title: "Rli47_figs"
+author: "Ben Cortes"
+date: "7/12/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Load packages
+
+```{r}
+
+# if (!require("tidyverse")) {install.packages("tidyverse")}
+# if (!require("ggplot2")) {install.packages("ggplot2")}
+# if (!require("ggpubr")) {install.packages("ggpubr")}
+# if (!require("svglite")) {install.packages("svglite")}
+
+library(ggplot2)
+library(ggpubr)
+library(tidyverse)
+library(svglite)
+library(openxlsx)
+library(stats)
+library(car)
+library(ggsignif)
+library(forcats)
+
+```
+
+
+FLOW CYT FIGURES
+
+box plots
+
+between strain t tests for 2 hour
+checking normalidy and variance
+
+```{r}
+#import data
+flowdata <- as_tibble(read.xlsx("All Flow Cytometry.xlsx", "Sheet7"))
+
+#subset by control vs LA 2hr
+flow2hr <- filter(flowdata, VsControl == "2hr")
+
+flow_strains <- split(flow2hr, f = flow2hr$Strain_phase)
+
+#run shapiro test on all strains to test for normality
+
+for (condition in flow_strains) {
+  print(condition$Strain_phase)
+  # print("percdiff")
+  # print(shapiro.test(condition$percdiff))
+  # print("square root")
+  # print(shapiro.test(condition$SqrTrans))
+  print("fold")
+  print(shapiro.test(condition$log2fold))
+}
+
+for (condition in flow_strains) {
+  print(condition$Strain_phase)
+  # print("percdiff")
+  # print(shapiro.test(condition$percdiff))
+  # print("square root")
+  # print(shapiro.test(condition$SqrTrans))
+  print("fold")
+  print(qqPlot(condition$log2fold))
+}
+
+
+#log2fold of 6comp stationary is not normal, but there's arguments that doing testing for normality is pointless
+#especially at this low of a sample size
+#QQplots look ok
+#https://stats.stackexchange.com/questions/2492/is-normality-testing-essentially-useless
+
+flowstrainpair <- split(flow2hr, f = flow2hr$Strain)
+
+#run bartlett's for testing for homoscedasticity on raw values and on square root transform
+
+for (condition in flowstrainpair) {
+  print(condition$Strain_phase)
+  # print(bartlett.test(condition$percdiff ~ condition$Phase, condition))
+  # print(bartlett.test(condition$SqrTrans ~ condition$Phase, condition))
+  print(bartlett.test(condition$log2fold ~ condition$Phase, condition))
+}
+
+#all log2fold comparisons are homoscedastic
+
+#so, can run welch's on WT and del
+
+for (condition in flowstrainpair) {
+  print(condition$Strain_phase)
+  print(t.test(condition$log2fold ~ condition$Phase))
+}
+
+#both significant
+#permutation test for 6compr log vs stationary
+
+library(coin)
+
+for (condition in flowstrainpair) {
+  print(condition$Strain_phase)
+  print(independence_test(condition$log2fold ~ as.factor(condition$Phase), condition, distribution = "exact"))
+}
+
+```
+
+plotting - percdiff
+
+
+
+box plots for single treatments anova
+
+```{r}
+#split data by treatment (log phase and comparison)
+flowanova <- split(flowdata, f = flowdata$treatment)
+
+#test data for normality
+#know from earlier code that for 2 hr timepoint that comp stationary isn't normal but others are
+#need to check normality of 15 min stationary phase
+fifteen <- filter(flowdata, VsControl == "15min")
+fifteensplit <- split(fifteen, f = fifteen$name)
+
+for (condition in fifteensplit) {
+  print(condition$Strain_phase)
+  print(condition$treatment)
+  print(shapiro.test(condition$log2fold))
+}
+
+#all normal
+
+for (condition in flowanova) {
+  print(condition$Strain_phase)
+  print(condition$treatment)
+  print(bartlett.test(condition$log2fold ~ condition$Strain_phase, condition))
+}
+
+#all groups are homoscedastic
+
+for (condition in flowanova) {
+  print(condition$Strain_phase)
+  print(summary(aov(condition$log2fold ~ condition$Strain_phase, condition)))
+}
+
+#kruskall of all three
+
+for (condition in flowanova) {
+  print(condition$Strain_phase)
+  print(kruskal_test(condition$log2fold ~ as.factor(condition$Strain_phase), condition, distribution = approximate(nresample = 100000)))
+}
+
+for (condition in flowanova) {
+  print(condition$Strain_phase)
+  print(kruskal_test(condition$log2fold ~ as.factor(condition$Strain_phase), condition, distribution = approximate(nresample = 100000)))
+}
+
+#anova and kruskal show none are sig diff
+
+```
+
+no reason really to compare the log to stationary
+
+```{r}
+
+#plot all box plots
+anovaplot <- ggplot(flow2hr, aes(x = Strain_phase, y = log2fold)) + 
+    geom_boxplot(width = 0.3) + 
+    geom_dotplot( binaxis = 'y', stackdir = 'center', dotsize = 0.5) +
+    theme_classic() +
+    ylab("Log2Fold Change") +
+    theme(axis.title.x = element_blank()) +
+  
+    #fix x axis so grouped by treatment
+    scale_x_discrete(limits=c("6179 logarithmic", "6179Δrli47 logarithmic", "6compr logarithmic", 
+    #"6179 stationary 15 min", "6179Δrli47 stationary 15 min", "6compr stationary 15 min",
+    "6179 stationary 2hr", "6179Δrli47 stationary 2hr", "6compr stationary 2hr"), 
+    labels = c("6179", "6179Δrli47", "6compr",
+               #"6179", "6179Δrli47", "6compr",
+               "6179", "6179Δrli47", "6compr")) +
+  
+#secondary axis labels  
+    annotate(geom = "text", x = 2, y=-7.5, label = "Logarithmic Phase", size = 3.5) +
+    annotate(geom = "text", x = 5, y=-7.5, label = "Stationary Phase", size = 3.5) +
+    #annotate(geom = "text", x = 8, y=-175, label = "stationary - 2 hr exposure", size = 3.5) +
+    coord_cartesian(ylim = c(-6,3), expand = T, clip = "off") +
+    #+
+    theme(plot.margin = unit(c(1, 1, 4, 1), "lines")) +
+  
+  #make significance bars
+    geom_signif(stat = "identity", 
+                data = data.frame(x=c(1.25, 4.25), xend=c(2.75, 5.75),
+                              y=c(2.6, 2.6), 
+                              annotation=c("N.S")), 
+                aes(x=x,xend=xend, y=y, yend=y, annotation=annotation)) +
+  
+  theme(axis.title.y = 
+            element_text(margin = margin(t = 10, r = 12, b = 0, l = 0))) +
+  
+  #make line at 0
+    geom_hline(yintercept=0, linetype="dashed", color = "gray", size=1)
+  
+anovaplot
+ggsave(file = "anova flow.svg", plot = anovaplot, width = 6.5, height = 4.5)
+ggsave(file = "anova flow.png", plot = anovaplot, width = 6.5, height = 4.5)
+
+```
+
+```{r}
+
+l2fplot <- ggarrange(flowplot2h, anovaplot,
+                                 labels = c("A", "B"),  ncol = 1, nrow = 2)
+l2fplot
+ggsave(file = "Figures/log2fold.svg", plot = l2fplot, width = 7, height = 8.5)
+ggsave(file = "Figures/log2fold.png", scale = 2, plot = l2fplot)
+
+
+```
+
