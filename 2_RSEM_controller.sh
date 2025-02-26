@@ -18,8 +18,11 @@ module load bowtie2
 #accept user input
 #ref - the RSEM index created by 1_RSEM_index.sh
 #outdir - an output directory to export results to
+#strand - string of either "none", "forward", or "reverse"
+	#defined in the RSEM manual - https://deweylab.github.io/RSEM/rsem-calculate-expression.html
 ref=$1
 outdir=${2%/}
+strand=$3
 mkdir $outdir
 
 #runs RSEM on all single-end fastq files
@@ -30,6 +33,6 @@ for rep in *clean.fastq; do
 	fragsd=$(awk 'BEGIN { t=0.0;sq=0.0; n=0;} ;NR%4==2 {n++;L=length($0);t+=L;sq+=L*L;}END{m=t/n; print sqrt(sq/n-m*m);}' $rep)
 	#echo $fragmean $fragsd
 	
-	sbatch 3_quantify_RSEM.sh $rep $ref ${outdir}/${rep%*_clean.fastq} $fragmean $fragsd
+	sbatch 3_quantify_RSEM.sh $rep $ref ${outdir}/${rep%*_clean.fastq} $fragmean $fragsd $strand
 	
 done
