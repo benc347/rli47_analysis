@@ -5,7 +5,7 @@
 #SBATCH --mem=16G						##max ram for the job
 
 #SBATCH --nodes=1						##request number of nodes (always keep at 1)
-#SBATCH --mail-user=bienvenido.tibbs-cortes@usda.gov		##email address to mail specified updates to
+#SBATCH --mail-user=YOUR_EMAIL_HERE			##email address to mail specified updates to
 #SBATCH --mail-type=BEGIN
 #SBATCH --mail-type=END					##these say under what conditions do you want email updates
 #SBATCH --mail-type=FAIL
