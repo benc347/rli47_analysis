@@ -11,16 +11,15 @@
 #SBATCH --mail-type=FAIL
 #SBATCH --output="00_rsem_index_slurmlog_%j"		##names what slurm logfile will be saved to 
 
-
-# LOAD MODULES, INSERT CODE, AND RUN YOUR PROGRAMS HERE
-## slurm break
-
+#load modules
 module load rsem
 module load bowtie2
 
-# Uses an RSEM index to quantify reads
-# GTF is the .gtf file for the strain
-# The .fasta file is the genome fasta for the strain
+#accept user input
+#outname - name of output directory to store RSEM index 
+#need to prepare an RSEM index from the genome of interest to quantify reads
+	# GTF - the .gtf file for the genome
+	# fasta - fasta file of the genome of interest
 
 outname=$1
 GTF=$2
